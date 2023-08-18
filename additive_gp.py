@@ -42,8 +42,8 @@ class StructuredPrediction:
   """Prediction of an additive function over blocks.
   
   Attributes:
-    y_pred_per_block: prediction of the function over each block
-    y_pred: prediction of the function over the whole domain
+    y_pred: prediction of the function over the whole domain.
+    y_pred_per_block: prediction of the function over each block independently. Useful for interpertation.
   """
   y_pred: jnp.array
   y_pred_per_block: List[jnp.array]
