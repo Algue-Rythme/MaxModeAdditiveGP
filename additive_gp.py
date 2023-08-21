@@ -6,9 +6,9 @@ from flax.struct import dataclass as pytree
 import jax.numpy as jnp
 from jaxopt.tree_util import tree_add_scalar_mul, tree_sum, tree_map
 
-from constraints import GPConstraints, NoConstraints, GaussianProcess
+from constraints import GPConstraints, FiniteDimensionalGP
 from function_basis import FunctionBasis
-from variables import VariablePartition, VariableBlock, Variable1D
+from variables import VariablePartition, VariableBlock
 
 
 @pytree
@@ -136,7 +136,7 @@ class MaxModeAdditiveGaussianProcess:
     K = self.kernel(multi_indices)  # K is of shape (L_b, L_b)
     return BlockInterpolator(K, Phi)
 
-  def fit_blocks(self, x_train) -> PartitionInterpolator:
+  def fit_blocks(self, x_train: jnp.array) -> PartitionInterpolator:
     """Fit the GP on all variable blocks.
     
     Args:
@@ -153,7 +153,9 @@ class MaxModeAdditiveGaussianProcess:
       Phi.append(block_interpolator.Phi)
     return PartitionInterpolator(K, Phi)
 
-  def build_additive_gp(self, partition_interpolator, y_train):
+  def build_additive_gp(self,
+                        partition_interpolator: PartitionInterpolator,
+                        y_train: jnp.array) -> FiniteDimensionalGP:
     """Fit the GP on all variable blocks.
     
     Args:
@@ -187,16 +189,21 @@ class MaxModeAdditiveGaussianProcess:
     # TODO: K is PSD so we can use Cholesky decomposition (maybe faster?)
     K_inv = tree_map(jnp.linalg.inv, K)  # list of arrays of shape (L_b, L_b)
     inv_regul = 1 / self.regul
+
+    # TODO: use tree_gram instead of tree_map. Here we have a block diagonal Gram matrix.
     Gram_Phi = tree_map(lambda Phi_b: Phi_b.T @ Phi_b, Phi)  # list of arrays of shape (L_b, L_b)
+
     inv_covariance = tree_add_scalar_mul(K_inv, inv_regul, Gram_Phi)  # equation (30)
 
     if self.debug:
       covariance = K - B_inv_A @ B.T  # work only for a single block.
       assert jnp.allclose(covariance @ inv_covariance, jnp.eye(covariance.shape[0]))
 
-    return GaussianProcess(mean, inv_covariance)
+    return FiniteDimensionalGP(mean, inv_covariance)
 
-  def fit(self, x_train, y_train):
+  def fit(self, 
+            x_train: jnp.array,
+            y_train: jnp.array):
     """Fit the additive GP.
     
     Args:
@@ -204,10 +211,10 @@ class MaxModeAdditiveGaussianProcess:
       y_train: values of the function at x_train of shape (n_points,)
     
     Returns:
-      ksi: coefficients of the additive GP, list of arrays of shape (L_b,)
+      additive function over disjoint blocks.
     """
     partition_interpolator = self.fit_blocks(x_train)
     gp = self.build_additive_gp(partition_interpolator, y_train)
-    ksi = self.constraints.find_max_mode(gp)
-    # ksi is of shape (m,)
+    # coefficients of the additive GP, list of arrays of shape (L_b,)
+    ksi = self.constraints.find_max_mode(gp)  
     return AdditiveFunction(ksi, self.variable_partition, self.function_basis)

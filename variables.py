@@ -54,13 +54,20 @@ class VariableBlock:
   """
   variables: List[Variable1D]
 
+  @property
+  def subdivision_shape(self):
+    """Shape of the subdivision of the block."""
+    return [v.basis_size for v in self.variables]
+
   def basis_size(self):
     """Number of hat functions in the block, denoted L_b.
+
+    Note: L_b = prod_i m_i where m_i is the number of subdivisions of the i-th variable.
     
     Remark: named \mathcal{L}_j in the paper.
     """
-    lengths = [len(v) for v in self.variables]
-    return onp.prod(onp.array(lengths))
+    lengths = self.subdivision_shape
+    return jnp.prod(jnp.array(lengths))
 
   def __len__(self):
     """Number of variables in the block."""
@@ -108,13 +115,13 @@ class VariableBlock:
     assert len(names) == len(set(names)), "Variable names must be unique"
 
 
-def isotropic_block(names, domain, num_ticks):
+def isotropic_block(names, indices, domain, num_ticks):
   """Create an isotropic block of variables."""
   eps = (domain[1] - domain[0]) / num_ticks
   sentinel_a, sentinel_b = domain[0]-eps, domain[1]+eps
   subdivision = jnp.linspace(domain[0], domain[1], num=num_ticks)
   subdivision = jnp.concatenate([jnp.array([sentinel_a]), subdivision, jnp.array([sentinel_b])])
-  return VariableBlock([Variable1D(name, i, subdivision) for i, name in enumerate(names)])
+  return VariableBlock([Variable1D(name, i, subdivision) for i, name in zip(names, indices)])
 
 
 @pytree
@@ -122,16 +129,19 @@ class VariablePartition:
   """Partition of variables with possibly different subdivisions.
   
   Attributes:
-    blocks: List of variable blocks.
+    blocks: List of disjoint variable blocks.
   """
   blocks: List[VariableBlock]
 
-  def len(self):
+  def __len__(self):
     return len(self.blocks)
 
+  def __iter__(self):
+    return iter(self.blocks)
+
   def basis_size(self):
-    lengths = [len(b) for b in self.blocks]
-    return onp.prod(onp.array(lengths))
+    lengths = [b.basis_size for b in self.blocks]
+    return jnp.sum(jnp.array(lengths))
 
   @property
   def names(self):

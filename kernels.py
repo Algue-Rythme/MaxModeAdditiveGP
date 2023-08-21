@@ -69,7 +69,7 @@ class GaussianKernel(MultivariateKernel):
     """Compute the covariance matrix of the kernel.
     
     Args:
-      x: points at which to evaluate the kernel of shape (n_points, n_variables)
+      x: points at which to evaluate the kernel, of shape (n_points, n_variables)
     
     Returns:
       covariance matrix of the kernel of shape (n_points, n_points)
