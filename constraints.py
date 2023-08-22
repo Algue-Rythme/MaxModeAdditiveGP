@@ -17,11 +17,11 @@ class FiniteDimensionalGP:
   """Finite dimensional Gaussian process evaluated at a set of points.
 
   Attributes:
-    mean: mean of the Gaussian process (pytree).
-    inv_covariance: inverse of the covariance matrix of the Gaussian process (pytree).
+    mean: mean of the Gaussian process of shape (L,).
+    inv_covariance: inverse of the covariance matrix of the Gaussian process, of shape (L, L).
   """
-  mean: Any
-  inv_covariance: Any
+  mean: jnp.array
+  inv_covariance: jnp.array
 
 
 class GPConstraints:
@@ -54,8 +54,8 @@ class GPConstraints:
       params_obj: object of type FiniteDimensionalGP.
     """
     x = alpha - params_obj.mean
-    linear_form = tree_matvec(params_obj.inv_covariance, x)
-    scalar = tree_dot(x, linear_form)
+    linear_form = params_obj.inv_covariance @ x
+    scalar = x @ linear_form
     # we drop the 0.5 factor since it does not change the argmin.  
     return scalar
 
@@ -82,6 +82,7 @@ class NoConstraints(GPConstraints):
     
     Expectedly, the maximum mode is the mean of the Gaussian process.
     """
+    del partition  # unused
     return gp.mean
 
 
@@ -151,7 +152,7 @@ class MonotoneConstraints(GPConstraints):
       subdivision_shape = block.subdivision_shape
       for axis in range(subdivision_shape.ndim):
         shape = list(subdivision_shape)
-        shape[axis] -= 1
+        shape[axis] -= 1  # difference along axis.  
         shapes.append(shape)
     return shapes
 
@@ -168,18 +169,17 @@ class MonotoneConstraints(GPConstraints):
 
     objective_fun = GPConstraints.objective_fun
 
-    def matvec_A(params_A, alphas):
+    def matvec_A(params_A, alpha):
+      """Compute the matrix-vector product Ax that appears in the constraints l <= Ax <= u."""
       del params_A
       # alpha is a list of arrays of shape (L_b,) each, with L = sum_b L_b
+      alphas_per_block = partition.split_and_reshape(alpha)  # list of lists of arrays of shape (L_b,)
       Ax = []
-      for alpha, block in zip(alphas, partition):
-        # block contains many variables with subdivision of shape (m_1, ..., m_{L_b})
-        # Note: L_b = prod_i m_i where m_i is the number of subdivisions of the i-th variable.
-        alpha = alpha.reshape(block.subdivision_shape)
+      for alpha in alphas_per_block:
         for axis in range(alpha.ndim):
-          monotonicity = jnp.diff(alpha, axis=axis)
+          monotonicity = jnp.diff(alpha, axis=axis)  # shape (m_1,..., m_i - 1,..., m_{L_b})
           Ax.append(monotonicity)
-      return Ax  # Ax is a list arrays of shape (m_1, m_i - 1, m_{L_b}) each.  
+      return Ax  # Ax is a list arrays of shape (m_1, ..., m_i - 1, ...,  m_{L_b}) each.  
 
     shapes = self._get_diff_shapes(partition)
     
@@ -199,7 +199,7 @@ class MonotoneConstraints(GPConstraints):
     # warm start the solver with the mean of the Gaussian process to speed up convergence.
     alpha0 = gp.mean
     kkt_sol = solver.init_params(alpha0)  # initialize the solver with the mean of the Gaussian process.
-    kkt_sol, state = solver.run(kkt_sol, params_obj=gp, params_eq=None, params_ineq=params_ineq)
+    kkt_sol, _ = solver.run(kkt_sol, params_obj=gp, params_eq=None, params_ineq=params_ineq)
 
     alpha_optimized = kkt_sol.primal[0]
 

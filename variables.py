@@ -59,6 +59,18 @@ class VariableBlock:
     """Shape of the subdivision of the block."""
     return [v.basis_size for v in self.variables]
 
+  def reshape_as_subdivision(self, x: jnp.array) -> jnp.array:
+    """Reshape x as the subdivision of the block.
+    
+    Args:
+      x: array of shape (L_b, batch_sizes) where
+        batch_sizes is the shape of the batch dimensions (if any)
+    
+    Returns:
+      array of shape (m_1, ..., m_{L_b}, batch_sizes)
+    """
+    return x.reshape(self.subdivision_shape + list(x.shape[1:]))
+
   def basis_size(self):
     """Number of hat functions in the block, denoted L_b.
 
@@ -116,7 +128,14 @@ class VariableBlock:
 
 
 def isotropic_block(names, indices, domain, num_ticks):
-  """Create an isotropic block of variables."""
+  """Create an isotropic block of variables.
+  
+  Args:
+    names: List of names of the variables.
+    indices: indices of the variables in the full partition.
+    domain: Domain of the variables.
+    num_ticks: Number of subdivisions of each variable.
+  """
   eps = (domain[1] - domain[0]) / num_ticks
   sentinel_a, sentinel_b = domain[0]-eps, domain[1]+eps
   subdivision = jnp.linspace(domain[0], domain[1], num=num_ticks)
@@ -138,9 +157,12 @@ class VariablePartition:
 
   def __iter__(self):
     return iter(self.blocks)
+  
+  def block_sizes(self):
+    return [b.basis_size for b in self.blocks]
 
   def basis_size(self):
-    lengths = [b.basis_size for b in self.blocks]
+    lengths = self.block_sizes()
     return jnp.sum(jnp.array(lengths))
 
   @property
@@ -150,6 +172,36 @@ class VariablePartition:
   @property
   def indices(self):
     return [i for b in self.blocks for i in b.indices]
+
+  def split(self, ksi: jnp.array) -> List[jnp.array]:
+    """Split x into blocks.
+    
+    Args:
+      ksi: array of shape (L,)
+
+    Returns:
+      list of arrays of shape (L_b,) each
+    """
+    block_indices = jnp.cumsum(self.block_sizes())
+    block_indices = block_indices[:-1]  # n blocks => n-1 indices
+    return jnp.split(ksi, block_indices)
+
+  def split_and_reshape(self, ksi: jnp.array) -> List[jnp.array]:
+    """Split x into blocks and reshape each block.
+    
+    Args:
+      ksi: array of shape (L,)
+
+    Returns:
+      list of arrays of shape (m_1, ..., m_{L_b}) each
+    """
+    pieces = self.split(ksi)
+    splitted = []
+    for piece, block in zip(pieces, self.blocks):
+      # block contains many variables with subdivision of shape (m_1, ..., m_{L_b})
+      # Note: L_b = prod_i m_i where m_i is the number of subdivisions of the i-th variable.
+      splitted.append(block.reshape_as_subdivision(piece))
+    return splitted
 
   def __post_init__(self):
     names = [n for b in self.blocks for n in b.names]

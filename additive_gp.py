@@ -1,7 +1,8 @@
 from dataclasses import dataclass as python_dataclass
 from kernels import MultivariateKernel
-from typing import List, Union
+from typing import List, Union, Any
 
+import jax
 from flax.struct import dataclass as pytree
 import jax.numpy as jnp
 from jaxopt.tree_util import tree_add_scalar_mul, tree_sum, tree_map
@@ -17,7 +18,7 @@ class BlockInterpolator:
   
   Attributes:
     K: kernel on spatial positions, of size (L_b, L_b)
-    Phi: values of the hat functions at x_train, of size (n_points, L_b)
+    Phi: values of the hat functions at x_train, of size (L_b, n_points)
   """
   K: jnp.array
   Phi: jnp.array
@@ -25,13 +26,13 @@ class BlockInterpolator:
 
 @pytree
 class PartitionInterpolator:
-  """Function defined on blocks of variables, used for interpolation.
+  """Function defined on disjoints blocks of variables, used for interpolation.
 
   Note: L = sum_b L_b is the total number of hat functions.
   
   Attributes:
-    K: kernel on spatial positions, of size (L, L)
-    Phi: values of the hat functions at x_train, of size (n_points, L)
+    K: kernel on spatial positions, block diagonal with blocks of size (L_b, L_b)
+    Phi: values of the hat functions at x_train, list of arrays of shape (L_b, n_points)
   """
   K: List[jnp.array]
   Phi: List[jnp.array]
@@ -56,9 +57,9 @@ class AdditiveFunction:
   Note: L = sum_b L_b is the total number of hat functions.
 
   Attributes:
-    ksi: max mode of the GP, list of arrays of shape (L_b,)
+    ksi: max mode of the GP, list of arrays of shape (L_b,) each
     variable_partition: partition of the variables
-    function_basis: basis of the function
+    function_basis: basis of the functions over the blocks
   """
   ksi: List[jnp.array]
   variable_partition: VariablePartition
@@ -70,11 +71,9 @@ class AdditiveFunction:
     """Predict the function at x_test for a single variable block."""
     block = self.variable_partition.blocks[block_idx]
     ksi_block = self.ksi[block_idx]  # shape (L_b,)
-    x_proj = block.project(x_test)  # shape (n_points, n_variables)
-    Phi = self.function_basis.evaluate_nD(block, x_proj)  # shape (n_points, L_b)
-    # Phi is of shape (n_points, L_b)
-    # ksi is of shape (L_b,)
-    y_pred = Phi @ ksi_block
+    x_proj = block.project(x_test)  # shape (n_points, n_variables_in_block)
+    Phi = self.function_basis.evaluate_nD(block, x_proj)  # shape (L_b, n_points)
+    y_pred = ksi_block @ Phi
     return y_pred  # y_pred is of shape (n_points,)
 
   def predict(self, x_test: jnp.array) -> jnp.array:
@@ -104,7 +103,7 @@ class MaxModeAdditiveGaussianProcess:
     function_basis: basis of the functions.
     kernel: kernel of the GP.
     constraints: constraints on the GP (e.g none, monotonicity, convexity...).
-    regul: float, regularization parameter (default 1e-3).
+    regul: positive float, regularization parameter (default 1e-3). Square of Tau parameter in the paper.
     debug: bool, whether to perform debug checks (default False).
   """
   variable_partition: VariablePartition
@@ -112,7 +111,7 @@ class MaxModeAdditiveGaussianProcess:
   kernel: List[MultivariateKernel]
   constraints: GPConstraints
   regul: Union[float, List[float]] = 1e-3
-  debug: bool = False
+  verbose: bool = False
 
   def fit_variable_block(self,
                          variable_block: VariableBlock,
@@ -131,8 +130,8 @@ class MaxModeAdditiveGaussianProcess:
     """
     x_proj = variable_block.project(x_train)
     # m is the number of hat functions in the block
-    Phi = self.function_basis.evaluate_nD(variable_block, x_proj)  # Phi is of shape (n_points, L_b)
-    multi_indices = variable_block.compute_subdivision_nd()  # shape (m_1 * ... * m_d, d)
+    Phi = self.function_basis.evaluate_nD(variable_block, x_proj)  # Phi is of shape (L_b, n_points)
+    multi_indices = variable_block.compute_subdivision_nd()  # shape (L_b, d)
     K = self.kernel(multi_indices)  # K is of shape (L_b, L_b)
     return BlockInterpolator(K, Phi)
 
@@ -153,6 +152,67 @@ class MaxModeAdditiveGaussianProcess:
       Phi.append(block_interpolator.Phi)
     return PartitionInterpolator(K, Phi)
 
+  def _compute_mean(self,
+                    K: jnp.array,
+                    Phi: Any,
+                    y_train: jnp.array,
+                    compute_covariance: bool = False) -> List[jnp.array]:
+    """Compute the mean of the additive GP.
+    
+    Args:
+      K: covariance matrix of the kernel, list of arrays of shape (L_b, L_b)
+      Phi: values of the hat functions at x_train, list of arrays of shape (L_b, n_points)
+      y_train: values of the function at x_train of shape (n_points,)
+      covariance: whether to return the full covariance matrix (default False)
+
+    Returns:
+      mean: mean of the additive GP, list of arrays of shape (L_b,)
+    """
+    K_Phi = tree_map(jnp.matmul, K, Phi)  # list of arrays of shape (L_b, n_points)
+
+    K_Phi = jnp.concatenate(K_Phi, axis=0)  # shape (L, n_points)
+    Phi = jnp.concatenate(Phi, axis=0)  # shape (L, n_points)
+
+    Phi_K_Phi = Phi.T @ K_Phi  # array of shape (n_points, n_points)
+    n_points = Phi_K_Phi.shape[0]
+    A = Phi_K_Phi + self.regul * jnp.eye(n_points)  # shape (n_points, n_points)
+
+    # TODO: A is PD so we can use Cholesky decomposition (maybe faster?)
+    inv_A = jnp.linalg.inv(A)  # shape (n_points, n_points)
+
+    # mean = K @ Phi @ ( Phi.T @ K @ Phi + regul * I )^-1 @ y_train
+    mean = K_Phi @ inv_A @ y_train  # arrays of shape (L,)
+
+    covariance = None
+    if compute_covariance:
+      covariance = K - K_Phi @ inv_A @ K_Phi.T  # Covariance in equation (29)
+    
+    return mean, covariance
+
+  def _compute_inv_covariance(self,
+                              K: List[jnp.array],
+                              Phi: List[jnp.array]) -> jnp.array:
+    """Compute the inverse of the covariance matrix of the additive GP.
+    
+    Based on Woodbury identity: https://en.wikipedia.org/wiki/Woodbury_matrix_identity
+
+    Args:
+      K: covariance matrix of the kernel, list of arrays of shape (L_b, L_b)
+      Phi: values of the hat functions at x_train, list of arrays of shape (L_b, n_points)
+    """
+    # TODO: K is PD so we can use Cholesky decomposition (maybe faster?)
+    K_inv = tree_map(jnp.linalg.inv, K)  # list of arrays of shape (L_b, L_b)
+
+    # from list of blocks to single big matrix with blocks on diagonal
+    K_inv = jax.scipy.linalg.block_diag(K_inv)  # shape (L, L)
+
+    Phi = jnp.concatenate(Phi, axis=0)  # shape (L, n_points)
+    GramPhi = Phi @ Phi.T  # matrix of shape (L, L)
+
+    inv_covariance = K_inv + ( 1 / self.regul) * GramPhi  # equation (30)
+
+    return inv_covariance
+
   def build_additive_gp(self,
                         partition_interpolator: PartitionInterpolator,
                         y_train: jnp.array) -> FiniteDimensionalGP:
@@ -169,41 +229,20 @@ class MaxModeAdditiveGaussianProcess:
     """
     K, Phi = partition_interpolator.K, partition_interpolator.Phi
 
-    def compute_B(K_b, Phi_b):
-      return K_b @ Phi_b.T  # shape (L_b, n_points)
-    B = tree_map(compute_B, K, Phi)  # list of arrays of shape (L_b, n_points)
+    mean, covariance = self._compute_mean(K, Phi, y_train, compute_covariance=self.debug)
 
-    def compute_Phi_B(Phi_b, B_b):
-      return Phi_b @ B_b
-    Phi_B = tree_map(compute_Phi_B, Phi, B)  # list of arrays of shape (n_points, n_points)
+    # computing the inverse of the covariance matrix can be done more efficiently
+    # than inverting the full matrix, since it is block diagonal.
+    inv_covariance = self._compute_inv_covariance(K, Phi)
 
-    n_points = Phi_B[0].shape[0]
-    A = sum(Phi_B) + self.regul * jnp.eye(n_points)  # shape (n_points, n_points)
-
-    # TODO: A is PSD so we can use Cholesky decomposition (maybe faster?)
-    inv_A = jnp.linalg.inv(A)  # shape (n_points, n_points)
-    B_inv_A = tree_map(lambda B_b: B_b @ inv_A, B)  # list of arrays of shape (L_b, n_points)
-
-    mean = tree_map(lambda B_b: B_b @ y_train, B_inv_A)  # list of arrays of shape (L_b,)
-
-    # TODO: K is PSD so we can use Cholesky decomposition (maybe faster?)
-    K_inv = tree_map(jnp.linalg.inv, K)  # list of arrays of shape (L_b, L_b)
-    inv_regul = 1 / self.regul
-
-    # TODO: use tree_gram instead of tree_map. Here we have a block diagonal Gram matrix.
-    Gram_Phi = tree_map(lambda Phi_b: Phi_b.T @ Phi_b, Phi)  # list of arrays of shape (L_b, L_b)
-
-    inv_covariance = tree_add_scalar_mul(K_inv, inv_regul, Gram_Phi)  # equation (30)
-
-    if self.debug:
-      covariance = K - B_inv_A @ B.T  # work only for a single block.
+    if self.verbose:
       assert jnp.allclose(covariance @ inv_covariance, jnp.eye(covariance.shape[0]))
 
     return FiniteDimensionalGP(mean, inv_covariance)
 
   def fit(self, 
-            x_train: jnp.array,
-            y_train: jnp.array):
+          x_train: jnp.array,
+          y_train: jnp.array) -> AdditiveFunction:
     """Fit the additive GP.
     
     Args:
@@ -213,8 +252,11 @@ class MaxModeAdditiveGaussianProcess:
     Returns:
       additive function over disjoint blocks.
     """
+    # evaluate the kernel on knots coordinates, evaluate the hat functions on x_train.
     partition_interpolator = self.fit_blocks(x_train)
+    # estimate the mean and the covariance matrix of the additive GP (with constraints).
     gp = self.build_additive_gp(partition_interpolator, y_train)
-    # coefficients of the additive GP, list of arrays of shape (L_b,)
-    ksi = self.constraints.find_max_mode(gp)  
+    # Find the maximum mode of the GP under the constraints.
+    ksi = self.constraints.find_max_mode(gp)  # dense vector of shape (L,)
+    ksi = self.variable_partition.split(ksi)  # list of arrays of shape (L_b,)
     return AdditiveFunction(ksi, self.variable_partition, self.function_basis)

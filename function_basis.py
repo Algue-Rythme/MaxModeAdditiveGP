@@ -1,4 +1,5 @@
 from abc import abstractmethod
+from typing import List
 import jax
 import jax.numpy as jnp
 from flax.struct import dataclass as pytree
@@ -11,14 +12,14 @@ class FunctionBasis:
 
   @abstractmethod
   def evaluate_1D(self, variable_1d: Variable1D, x: jnp.array) -> jnp.array:
-    raise NotImplementedError
+    pass
 
   @abstractmethod
   def evaluate_nD(self, variable_block: VariableBlock, x: jnp.array) -> jnp.array:
-    raise NotImplementedError
+    pass
 
 
-def unstack(x, axis=0):
+def unstack(x: jnp.array, axis: int = 0) -> List[jnp.array]:
   return [jax.lax.index_in_dim(x, i, axis, keepdims=False) for i in range(x.shape[axis])]
 
 
@@ -68,24 +69,24 @@ class HatFunctions(FunctionBasis):
     return evaluations
 
   def evaluate_nD(self,
-                  variable_block: VariableBlock,
+                  block: VariableBlock,
                   x: jnp.array,
-                  reshape: bool = False) -> jnp.array:
+                  multi_indices: bool = False) -> jnp.array:
     """Evaluate the hat functions in nD.
     
     Args:
-      variable_block: block of variables containing n_variables.
+      block: block of variables containing n_variables.
       x: points at which to evaluate the hat functions, of shape (n_points, n_variables)
         the variables must be ordered as in the block.
-      reshape: whether to reshape the output to (n_points, subdivision_size_0, ..., subdivision_size_{n_variables-1})
+      multi_indices: whether to reshape the output to (n_points, subdivision_size_0, ..., subdivision_size_{n_variables-1})
 
     Returns:
       values of the hat functions at x, of shape
-        (n_points, subdivision_size_0, ..., subdivision_size_{n_variables-1}) if reshape is True
-        (n_points, subdivision_size_0 * ... * subdivision_size_{n_variables-1}) otherwise
+        (subdivision_size_0, ..., subdivision_size_{n_variables-1}, n_points) if reshape is True
+        (subdivision_size_0 * ... * subdivision_size_{n_variables-1}, n_points) otherwise
     """
     x_1ds = unstack(x, axis=1)  # x_1ds is a list of arrays of shape (n_points,)
-    phi_1Ds = [self.evaluate_1D(variable_1d, x_1d) for variable_1d, x_1d in zip(variable_block, x_1ds)]
+    phi_1Ds = [self.evaluate_1D(var_1d, x_1d) for var_1d, x_1d in zip(block, x_1ds)]
     # phi_1D is a list of arrays of shape (n_points, subdivision_size)
     Phi = phi_1Ds[0]
     for phi_1D in phi_1Ds[1:]:
@@ -98,7 +99,7 @@ class HatFunctions(FunctionBasis):
       # einsum without contraction is equivalent to outer product
       Phi = Phi.reshape((Phi.shape[0], -1))  # Phi is now of shape (n_points, subdivision_size_prev * subdivision_size_next)
     # Phi is now of shape (n_points, subdivision_size_0 * ... * subdivision_size_{n_variables-1})
-    if reshape:
-      shape_multi_indices = tuple([x.shape[0]] + [variable_1d.basis_size() for variable_1d in variable_block])
-      Phi = Phi.reshape(shape_multi_indices)  # Phi is now of shape (n_points, subdivision_size_0, ..., subdivision_size_{n_variables-1})
+    Phi = Phi.T  # Phi is now of shape (subdivision_size_0 * ... * subdivision_size_{n_variables-1}, n_points)
+    if multi_indices:
+      Phi = block.reshape_as_subdivision(Phi)
     return Phi
