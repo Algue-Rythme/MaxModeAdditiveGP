@@ -204,7 +204,7 @@ class MaxModeAdditiveGaussianProcess:
     K_inv = tree_map(jnp.linalg.inv, K)  # list of arrays of shape (L_b, L_b)
 
     # from list of blocks to single big matrix with blocks on diagonal
-    K_inv = jax.scipy.linalg.block_diag(K_inv)  # shape (L, L)
+    K_inv = jax.scipy.linalg.block_diag(*K_inv)  # shape (L, L)
 
     Phi = jnp.concatenate(Phi, axis=0)  # shape (L, n_points)
     GramPhi = Phi @ Phi.T  # matrix of shape (L, L)
@@ -229,7 +229,7 @@ class MaxModeAdditiveGaussianProcess:
     """
     K, Phi = partition_interpolator.K, partition_interpolator.Phi
 
-    mean, covariance = self._compute_mean(K, Phi, y_train, compute_covariance=self.debug)
+    mean, covariance = self._compute_mean(K, Phi, y_train, compute_covariance=self.verbose)
 
     # computing the inverse of the covariance matrix can be done more efficiently
     # than inverting the full matrix, since it is block diagonal.
@@ -257,6 +257,6 @@ class MaxModeAdditiveGaussianProcess:
     # estimate the mean and the covariance matrix of the additive GP (with constraints).
     gp = self.build_additive_gp(partition_interpolator, y_train)
     # Find the maximum mode of the GP under the constraints.
-    ksi = self.constraints.find_max_mode(gp)  # dense vector of shape (L,)
+    ksi = self.constraints.find_max_mode(gp, self.variable_partition)  # dense vector of shape (L,)
     ksi = self.variable_partition.split(ksi)  # list of arrays of shape (L_b,)
     return AdditiveFunction(ksi, self.variable_partition, self.function_basis)

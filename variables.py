@@ -22,14 +22,17 @@ class Variable1D:
   index: int
   subdivision: jnp.array
 
+  @property
   def basis_size(self):
     """Number of hat functions."""
     return len(self.subdivision)-2  # 2 values are sentinels
 
+  @property
   def domain(self):
     """Domain of the variable."""
     return self.subdivision[1], self.subdivision[-2]
 
+  @property
   def sentinels(self):
     """Sentinel values of the variable."""
     return self.subdivision[0], self.subdivision[-1]
@@ -71,6 +74,7 @@ class VariableBlock:
     """
     return x.reshape(self.subdivision_shape + list(x.shape[1:]))
 
+  @property
   def basis_size(self):
     """Number of hat functions in the block, denoted L_b.
 
@@ -140,7 +144,12 @@ def isotropic_block(names, indices, domain, num_ticks):
   sentinel_a, sentinel_b = domain[0]-eps, domain[1]+eps
   subdivision = jnp.linspace(domain[0], domain[1], num=num_ticks)
   subdivision = jnp.concatenate([jnp.array([sentinel_a]), subdivision, jnp.array([sentinel_b])])
-  return VariableBlock([Variable1D(name, i, subdivision) for i, name in zip(names, indices)])
+  return VariableBlock([Variable1D(name, i, subdivision) for i, name in zip(indices, names)])
+
+
+def block_1D(name, index, domain, num_ticks):
+  """Create a block containing a single 1D variable."""
+  return isotropic_block([name], [index], domain, num_ticks)
 
 
 @pytree
@@ -158,11 +167,13 @@ class VariablePartition:
   def __iter__(self):
     return iter(self.blocks)
   
+  @property
   def block_sizes(self):
     return [b.basis_size for b in self.blocks]
 
+  @property
   def basis_size(self):
-    lengths = self.block_sizes()
+    lengths = self.block_sizes
     return jnp.sum(jnp.array(lengths))
 
   @property
@@ -182,7 +193,7 @@ class VariablePartition:
     Returns:
       list of arrays of shape (L_b,) each
     """
-    block_indices = jnp.cumsum(self.block_sizes())
+    block_indices = jnp.cumsum(jnp.array(self.block_sizes))
     block_indices = block_indices[:-1]  # n blocks => n-1 indices
     return jnp.split(ksi, block_indices)
 
