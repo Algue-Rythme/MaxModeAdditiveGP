@@ -9,11 +9,12 @@ def tree_matvec(A, x):
 
 
 def regression_report(y_true, y_pred):
+  mse_err = (y_true - y_pred)**2
   abs_err = jnp.abs(y_pred - y_true)
-  rel_err = jnp.where(y_true == 0, abs_err, abs_err / jnp.abs(y_true))
   evs = 1 - jnp.var(y_true - y_pred) / jnp.var(y_true)
+  print(f"Mean squared error: {jnp.mean(mse_err):.4f}")
   print(f"Mean absolute error: {jnp.mean(abs_err):.4f}")
-  print(f"Mean relative error: {jnp.mean(rel_err):.4f}%")
   print(f"Explained variance score: {evs*100:.4f}%")
-  df = pd.DataFrame({'absolute_error': abs_err, 'relative_error': rel_err}).T
+  df = pd.DataFrame({'absolute_error': abs_err}).T
+  df.columns = [f'x[{i}]' for i in range(len(y_true))]
   return df

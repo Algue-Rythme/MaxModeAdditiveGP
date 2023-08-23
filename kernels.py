@@ -61,6 +61,8 @@ class GaussianKernel(MultivariateKernel):
     length_scale: length scale of the kernel.
     
   Remark: the kernel is defined as exp(-0.5 * ||x - y||^2 / length_scale^2)
+
+  length_scale = length_scale_multiplier * gamma
   """
   variance: float = 1.
   length_scale: float = 1.
@@ -74,6 +76,8 @@ class GaussianKernel(MultivariateKernel):
     Returns:
       covariance matrix of the kernel of shape (n_points, n_points)
     """
-    x = x / self.length_scale
-    hilbert_norm = jnp.sum(jnp.square(x[:, None, :] - x[None, :, :]), axis=2)
+    default_bandwidth = jnp.sqrt(x.shape[-1] * jnp.var(x))  # based on scikit's RBF kernel
+    bandwidth = self.length_scale * default_bandwidth
+    x = x / bandwidth
+    hilbert_norm = jnp.sum(jnp.square(x[:, None, :] - x[None, :, :]), axis=-1)
     return self.variance * jnp.exp(-0.5 * hilbert_norm)

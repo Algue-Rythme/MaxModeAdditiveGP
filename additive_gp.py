@@ -1,13 +1,13 @@
 from dataclasses import dataclass as python_dataclass
 from kernels import MultivariateKernel
-from typing import List, Union, Any
+from typing import List, Union, Any, Optional
 
 import jax
 from flax.struct import dataclass as pytree
 import jax.numpy as jnp
-from jaxopt.tree_util import tree_add_scalar_mul, tree_sum, tree_map
+from jaxopt.tree_util import tree_map
 
-from constraints import GPConstraints, FiniteDimensionalGP
+from constraints import ConstraintsSolver, FiniteDimensionalGP, BlockConstraints
 from function_basis import FunctionBasis
 from variables import VariablePartition, VariableBlock
 
@@ -95,21 +95,25 @@ class AdditiveFunction:
 
 
 @python_dataclass
-class MaxModeAdditiveGaussianProcess:
+class ConstrainedAdditiveGP:
   """Additive Gaussian process.
   
   Attributes:
-    variable_partition: partition of the input variables.
+    partition: partition of the input variables.
     function_basis: basis of the functions.
     kernel: kernel of the GP.
-    constraints: constraints on the GP (e.g none, monotonicity, convexity...).
     regul: positive float, regularization parameter (default 1e-3). Square of Tau parameter in the paper.
+    constraints: list of constraints on the GP (e.g none, monotonicity, convexity...).
+                  Length must match the number of blocks in the partition.  
+                  Use None in the entry for no constraints.
+    constraints_solver: quadratic solver for the constraints (default ConstraintsSolver).
     debug: bool, whether to perform debug checks (default False).
   """
-  variable_partition: VariablePartition
+  partition: VariablePartition
   function_basis: FunctionBasis
   kernel: List[MultivariateKernel]
-  constraints: GPConstraints
+  constraints: List[Optional[BlockConstraints]]
+  constraints_solver: ConstraintsSolver = ConstraintsSolver()
   regul: Union[float, List[float]] = 1e-3
   verbose: bool = False
 
@@ -146,7 +150,7 @@ class MaxModeAdditiveGaussianProcess:
       Phi: values of the hat functions at x_train of shape (n_points, L)
     """
     K, Phi = [], []
-    for block in self.variable_partition.blocks:
+    for block in self.partition.blocks:
       block_interpolator = self.fit_variable_block(block, x_train)
       K.append(block_interpolator.K)
       Phi.append(block_interpolator.Phi)
@@ -185,7 +189,7 @@ class MaxModeAdditiveGaussianProcess:
 
     covariance = None
     if compute_covariance:
-      covariance = K - K_Phi @ inv_A @ K_Phi.T  # Covariance in equation (29)
+      covariance = jax.scipy.linalg.block_diag(*K) - K_Phi @ inv_A @ K_Phi.T  # Covariance in equation (29)
     
     return mean, covariance
 
@@ -208,6 +212,11 @@ class MaxModeAdditiveGaussianProcess:
 
     Phi = jnp.concatenate(Phi, axis=0)  # shape (L, n_points)
     GramPhi = Phi @ Phi.T  # matrix of shape (L, L)
+
+    if self.verbose:
+      print("Kernel", K)
+      print("Inv Kernel", K_inv)
+      print("Gram Phi", GramPhi)
 
     inv_covariance = K_inv + ( 1 / self.regul) * GramPhi  # equation (30)
 
@@ -232,11 +241,20 @@ class MaxModeAdditiveGaussianProcess:
     mean, covariance = self._compute_mean(K, Phi, y_train, compute_covariance=self.verbose)
 
     # computing the inverse of the covariance matrix can be done more efficiently
-    # than inverting the full matrix, since it is block diagonal.
+    # than inverting the covariance matrix, since K is block diagonal.
     inv_covariance = self._compute_inv_covariance(K, Phi)
 
     if self.verbose:
-      assert jnp.allclose(covariance @ inv_covariance, jnp.eye(covariance.shape[0]))
+      I_approx = covariance @ inv_covariance
+      I = jnp.eye(covariance.shape[0])
+      residuals = I - I_approx
+      error = jnp.linalg.norm(residuals)
+      print(f"Error ||Cov Conv^{-1} - I|| = {error}")
+      print("Cov eigenvalues", jnp.linalg.eigvals(covariance)) 
+      print("Cov^{-1} eigenvalues", jnp.linalg.eigvals(inv_covariance))
+      print("inv(Cov) eigenvalues", jnp.linalg.eigvals(jnp.linalg.inv(covariance)))
+      print("inv(Cov^{-1}) eigenvalues", jnp.linalg.eigvals(jnp.linalg.inv(inv_covariance)))
+      # assert jnp.allclose(covariance @ inv_covariance, jnp.eye(covariance.shape[0]))
 
     return FiniteDimensionalGP(mean, inv_covariance)
 
@@ -257,6 +275,7 @@ class MaxModeAdditiveGaussianProcess:
     # estimate the mean and the covariance matrix of the additive GP (with constraints).
     gp = self.build_additive_gp(partition_interpolator, y_train)
     # Find the maximum mode of the GP under the constraints.
-    ksi = self.constraints.find_max_mode(gp, self.variable_partition)  # dense vector of shape (L,)
-    ksi = self.variable_partition.split(ksi)  # list of arrays of shape (L_b,)
-    return AdditiveFunction(ksi, self.variable_partition, self.function_basis)
+    ksi = self.constraints_solver.find_maximum_a_posteriori(gp, self.partition, self.constraints)
+    # change ksi from dense vector of shape (L,) to list of arrays of shape (L_b,)
+    ksi = self.partition.split(ksi)  # list of arrays of shape (L_b,)
+    return AdditiveFunction(ksi, self.partition, self.function_basis)

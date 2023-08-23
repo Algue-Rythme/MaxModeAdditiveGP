@@ -70,7 +70,7 @@ class VariableBlock:
         batch_sizes is the shape of the batch dimensions (if any)
     
     Returns:
-      array of shape (m_1, ..., m_{L_b}, batch_sizes)
+      array of shape (m_1, ..., m_d, batch_sizes)
     """
     return x.reshape(self.subdivision_shape + list(x.shape[1:]))
 
@@ -83,7 +83,7 @@ class VariableBlock:
     Remark: named \mathcal{L}_j in the paper.
     """
     lengths = self.subdivision_shape
-    return jnp.prod(jnp.array(lengths))
+    return onp.prod(onp.array(lengths))
 
   def __len__(self):
     """Number of variables in the block."""
@@ -193,7 +193,7 @@ class VariablePartition:
     Returns:
       list of arrays of shape (L_b,) each
     """
-    block_indices = jnp.cumsum(jnp.array(self.block_sizes))
+    block_indices = onp.cumsum(onp.array(self.block_sizes))
     block_indices = block_indices[:-1]  # n blocks => n-1 indices
     return jnp.split(ksi, block_indices)
 
@@ -204,12 +204,12 @@ class VariablePartition:
       ksi: array of shape (L,)
 
     Returns:
-      list of arrays of shape (m_1, ..., m_{L_b}) each
+      list of arrays of shape (m_1, ..., m_d) each
     """
     pieces = self.split(ksi)
     splitted = []
     for piece, block in zip(pieces, self.blocks):
-      # block contains many variables with subdivision of shape (m_1, ..., m_{L_b})
+      # block contains many variables with subdivision of shape (m_1, ..., m_d)
       # Note: L_b = prod_i m_i where m_i is the number of subdivisions of the i-th variable.
       splitted.append(block.reshape_as_subdivision(piece))
     return splitted

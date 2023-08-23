@@ -2,3 +2,4 @@ numpy
 jax
 flax
 matplotlib
+jaxopt
