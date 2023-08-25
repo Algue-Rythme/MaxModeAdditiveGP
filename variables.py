@@ -92,6 +92,9 @@ class VariableBlock:
   def __iter__(self):
     return iter(self.variables)
 
+  def __getitem__(self, item):
+    return self.variables[item]
+
   @property
   def names(self):
     """Names of the variables in the full partition."""

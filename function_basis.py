@@ -86,21 +86,27 @@ class HatFunctions(FunctionBasis):
         (subdivision_size_0 * ... * subdivision_size_{n_variables-1}, n_points) otherwise
     """
     x_1ds = unstack(x, axis=1)  # x_1ds is a list of arrays of shape (n_points,)
+
+    # phi_1Ds is a list of arrays of shape (n_points, subdivision_size)
     phi_1Ds = [self.evaluate_1D(var_1d, x_1d) for var_1d, x_1d in zip(block, x_1ds)]
-    # phi_1D is a list of arrays of shape (n_points, subdivision_size)
+
+    # p denotes the point index, t denotes the hat function index
+    # Phi is indexed by (p, i), phi_1D is indexed by (p, j)
+    # p index will go from 0 to n_points-1
+    # j index will go from 0 to subdivision_size-1
+    # i index will go from 0 to prod_{k=0}^{j-1} subdivision_size_k
+    # Phi = jnp.einsum('pi,pj->pij', Phi, phi_1D)  
+
     parallel_outer = jax.vmap(jnp.outer, in_axes=(0, 0), out_axes=0)  # parallelized over all train examples.
     Phi = phi_1Ds[0]
     for phi_1D in phi_1Ds[1:]:
-      # p denotes the point index, t denotes the hat function index
-      # Phi is indexed by (p, i), phi_1D is indexed by (p, j)
-      # p index will go from 0 to n_points-1
-      # j index will go from 0 to subdivision_size-1
-      # i index will go from 0 to prod_{k=0}^{j-1} subdivision_size_k
-      # Phi = jnp.einsum('pi,pj->pij', Phi, phi_1D)  
       Phi = parallel_outer(Phi, phi_1D)  # Phi is now of shape (n_points, subdivision_size_prev, subdivision_size_next)
       Phi = Phi.reshape((Phi.shape[0], -1))  # Phi is now of shape (n_points, subdivision_size_prev * subdivision_size_next)
+      
     # Phi is now of shape (n_points, subdivision_size_0 * ... * subdivision_size_{n_variables-1})
     Phi = Phi.T  # Phi is now of shape (subdivision_size_0 * ... * subdivision_size_{n_variables-1}, n_points)
+
     if multi_indices:
       Phi = block.reshape_as_subdivision(Phi)
+    
     return Phi

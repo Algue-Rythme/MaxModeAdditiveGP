@@ -7,8 +7,9 @@ from flax.struct import dataclass as pytree
 import jax.numpy as jnp
 from jaxopt.tree_util import tree_map
 
-from constraints import ConstraintsSolver, FiniteDimensionalGP, BlockConstraints
+from constraints import FiniteDimensionalGP, BlockConstraints
 from function_basis import FunctionBasis
+from solver import ConstraintsSolver
 from variables import VariablePartition, VariableBlock
 
 
@@ -106,14 +107,14 @@ class ConstrainedAdditiveGP:
     constraints: list of constraints on the GP (e.g none, monotonicity, convexity...).
                   Length must match the number of blocks in the partition.  
                   Use None in the entry for no constraints.
-    constraints_solver: quadratic solver for the constraints (default ConstraintsSolver).
+    solver: quadratic solver for the constraints (default ConstraintsSolver).
     debug: bool, whether to perform debug checks (default False).
   """
   partition: VariablePartition
   function_basis: FunctionBasis
   kernel: List[MultivariateKernel]
   constraints: List[Optional[BlockConstraints]]
-  constraints_solver: ConstraintsSolver = ConstraintsSolver()
+  solver: ConstraintsSolver = ConstraintsSolver()
   regul: Union[float, List[float]] = 1e-3
   verbose: bool = False
 
@@ -254,7 +255,6 @@ class ConstrainedAdditiveGP:
       print("Cov^{-1} eigenvalues", jnp.linalg.eigvals(inv_covariance))
       print("inv(Cov) eigenvalues", jnp.linalg.eigvals(jnp.linalg.inv(covariance)))
       print("inv(Cov^{-1}) eigenvalues", jnp.linalg.eigvals(jnp.linalg.inv(inv_covariance)))
-      # assert jnp.allclose(covariance @ inv_covariance, jnp.eye(covariance.shape[0]))
 
     return FiniteDimensionalGP(mean, inv_covariance)
 
@@ -275,7 +275,7 @@ class ConstrainedAdditiveGP:
     # estimate the mean and the covariance matrix of the additive GP (with constraints).
     gp = self.build_additive_gp(partition_interpolator, y_train)
     # Find the maximum mode of the GP under the constraints.
-    ksi = self.constraints_solver.find_maximum_a_posteriori(gp, self.partition, self.constraints)
+    ksi = self.solver.find_maximum_a_posteriori(gp, self.partition, self.constraints)
     # change ksi from dense vector of shape (L,) to list of arrays of shape (L_b,)
     ksi = self.partition.split(ksi)  # list of arrays of shape (L_b,)
     return AdditiveFunction(ksi, self.partition, self.function_basis)

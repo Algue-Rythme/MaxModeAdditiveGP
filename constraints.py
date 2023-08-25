@@ -2,9 +2,10 @@ from abc import ABC, abstractmethod
 from typing import Any, List, Optional, Tuple, Callable
 from dataclasses import dataclass as python_dataclass
 
+import numpy as onp
 import jax.numpy as jnp
 from flax.struct import dataclass as pytree
-from variables import VariablePartition, VariableBlock
+from variables import VariableBlock
 
 
 @pytree
@@ -93,7 +94,6 @@ class MonotoneConstraints(BlockConstraints):
     solver_kwargs: additional arguments to pass to the solver.
   """
   monotonicity: str = 'increasing'
-  solver_kwargs: Optional[dict] = None
 
   def _get_diff_shapes(self, block: VariableBlock):
     """Get the shapes of the differences of the variables in the partition."""
@@ -139,136 +139,82 @@ class MonotoneConstraints(BlockConstraints):
     return params_ineq
 
 
-class ConstraintsSolver:
-  """Solver for the constraints of the constrained Gaussian process.
+@python_dataclass
+class CurvatureConstraints(BlockConstraints):
+  """Bounded constraints on the Gaussian process.
+
+  The concavity/convexity property is denoted `curvature` since for smooth functions (like GP)
+  the concavity/convexity property is a statement on the spectrum of the Hessian matrix.
   
-  Solve the following optimization problem:
-
-    .. math::
-      \\max_{x} \\frac{1}{2} (x^T - \\mu) K^{-1} (x - \\mu)
-        \\text{ s.t. } x \\in \\mathcal{C}
-
-    Note that we can expand the objective function as:
-
-    .. math::
-      \\frac{1}{2} (x^T - \\mu) K^{-1} (x - \\mu) = \\frac{1}{2} x^T K^{-1} x - \\mu^T K^{-1} x + \\frac{1}{2} \\mu^T K^{-1} \\mu
-
-    where we recognize the quadratic term as K^{-1},
-    the affine term as -\\mu^T K^{-1} x and the constant term as \\frac{1}{2} \\mu^T K^{-1} \\mu.
-
-    Observe that since K^{-1} is PSD, the objective function is convex, while the constraints $\\mathcal{C}$ are linear.
-    Therefore, this is a quadratic program, which can be solved efficiently with OSQP routines from jaxopt.
+  Attributes:
+    curvature: whether the Gaussian process is `convex` or `concave` (default: `convex`).
+    solver_kwargs: additional arguments to pass to the solver.
   """
-  
-  def __init__(self, **kwargs):
-    """Initialize the solver.
-    
-    Args:
-      solver_kwargs: additional arguments to pass to the solver.
-    """
-    self.solver_kwargs = kwargs
+  curvature: str = 'convex'
 
-  @staticmethod
-  def _objective_fun(alpha: jnp.array, params_obj: FiniteDimensionalGP) -> jnp.array:
-    """Objective function of the optimization problem.
-    
-    Args:
-      alpha: vector of shape (L,) to optimize.
-      params_obj: object of type FiniteDimensionalGP.
-    """
-    x = alpha - params_obj.mean
-    linear_form = jnp.dot(params_obj.inv_covariance, x)
-    scalar = jnp.vdot(x, linear_form)
-    # we drop the 0.5 factor since it does not change the argmin.  
-    return scalar
+  def _get_diff_shapes(self, block: VariableBlock):
+    """Get the shapes of the differences of the variables in the partition."""
+    shapes = []
+    subdivision_shape = block.subdivision_shape
+    ndim = len(subdivision_shape)
+    for axis in range(ndim):
+      shape = list(subdivision_shape)
+      shape[axis] -= 2  # difference along axis.  
+      shapes.append(shape)
+    return shapes
 
-  @staticmethod
-  def _build_bounds(partition: VariablePartition,
-                    constraints: List[BlockConstraints]) -> Tuple[List[Any], List[Any]]:
-    upper_bounds = []
-    lower_bounds = []
-    for block, block_cons in zip(partition, constraints):
-      if block_cons.is_empty():
-        continue
-      l, u = block_cons.get_bounds(block)
-      lower_bounds.append(l)
-      upper_bounds.append(u)
-    return lower_bounds, upper_bounds
+  def get_matvec(self, block: VariableBlock) -> Callable:
 
-  @staticmethod
-  def _build_matvec(partition: VariablePartition,
-                    constraints: List[BlockConstraints]) -> Callable:
-    
-    def Ax(params_A: Any, alphas: jnp.array) -> List[Any]:
+    def matvec_A(params_A: Any, alpha: jnp.array) -> List[jnp.array]:
+      """Compute the matrix-vector product Ax that appears in the constraints l <= Ax <= u."""
       del params_A
-      alphas = partition.split_and_reshape(alphas)  # list of arrays of shape (m_1, ..., m_d) each.
       Ax = []
-      for block, block_cons, alpha in zip(partition, constraints, alphas):
-        if block_cons.is_empty():
-          continue
-        matvec = block_cons.get_matvec(block)
-        block_Ax = matvec(None, alpha)
-        Ax.append(block_Ax)
-      return Ax
+      for axis in range(alpha.ndim):
+        subdivision = block[axis].subdivision_without_sentinels
+
+        a_delta = jnp.diff(alpha, n=1, axis=axis)  # shape (m_1,..., m_i - 1,..., m_d)
+        t_delta = jnp.diff(subdivision, n=1, axis=axis)  # shape (m_i - 1,)
+
+        # Numpy arrays are compile-time constant so they can be used in indexing.
+        all_but_end = onp.arange(a_delta.shape[axis] - 1)  # indices of all but the last element along axis.
+        all_but_first = onp.arange(1, a_delta.shape[axis])  # indices of all but the first element along axis.
+
+        a_delta_no_end = jnp.take(a_delta, indices=all_but_end, axis=axis)  # shape (m_1,..., m_i - 2,..., m_d)
+        a_delta_no_first = jnp.take(a_delta, indices=all_but_first, axis=axis)  # shape (m_1,..., m_i - 2,..., m_d)
+
+        t_delta_no_end = jnp.take(t_delta, indices=all_but_end, axis=axis)  # shape (m_i - 2,)
+        t_delta_no_first = jnp.take(t_delta, indices=all_but_first, axis=axis)  # shape (m_i - 2,)
+
+        # broadcast t_delta_* to shape (m_1,..., m_i - 2,..., m_d)
+        axis_size = len(subdivision) - 2
+        broadcast_shape = [1] * axis + [axis_size] + [1] * (alpha.ndim - axis - 1)
+        t_delta_no_end = jnp.reshape(t_delta_no_end, broadcast_shape)
+        t_delta_no_first = jnp.reshape(t_delta_no_first, broadcast_shape)
+
+        factor_1 = a_delta_no_first * t_delta_no_end  # shape (m_1,..., m_i - 2,..., m_d)
+        factor_2 = a_delta_no_end * t_delta_no_first  # shape (m_1,..., m_i - 2,..., m_d)
+
+        curvature = factor_1 - factor_2  # shape (m_1,..., m_i - 2,..., m_d)
+
+        Ax.append(curvature)
+      return Ax  # Ax is a list arrays of shape (m_1, ..., m_i - 2, ...,  m_d) each.  
+
+    return matvec_A
+
+  def get_bounds(self, block: VariableBlock) -> Tuple[List[jnp.array], List[jnp.array]]:
+    """Get the bounds l and u that appear in the constraints l <= Ax <= u."""
+    shapes = self._get_diff_shapes(block)
     
-    return Ax
-
-  @staticmethod
-  def no_constraints(constraints: List[BlockConstraints]):
-    """Whether there are no constraints."""
-    return all(constraint.is_empty() for constraint in constraints)
-
-  @staticmethod
-  def _canonicalize_constraints(partition: VariablePartition,
-                                constraints: List[Optional[BlockConstraints]]):
-    """Canonicalize the constraints to a list of BlockConstraints."""
-    if constraints is None:
-      constraints = [None] * len(partition)  # no constraints.
-    elif isinstance(constraints, BlockConstraints):
-      constraints = [constraints] * len(partition)  # broadcast the same constraint to all blocks.
-    elif len(constraints) != len(partition):
-      raise ValueError(f"Expected {len(partition)} constraints, got {len(constraints)}.")
+    if self.curvature == 'convex':
+      # 0 <= ksi[block][var][i+1] - ksi[block][var][i] <= +infty
+      l = [jnp.zeros(shape) for shape in shapes]
+      u = [jnp.full(shape, float('inf')) for shape in shapes]
+    elif self.curvature == 'concave':
+      # -infty <= ksi[block][var][i+1] - ksi[block][var][i] <= 0
+      l = [jnp.full(shape, float('-inf')) for shape in shapes]
+      u = [jnp.zeros(shape) for shape in shapes]
+    else:
+      raise ValueError(f"Unknown curvature {self.monotonicity}.")
     
-    canonicalized = []
-    for block_cons in constraints:
-      if block_cons is None:
-        canonicalized.append(NoConstraints())
-      elif isinstance(block_cons, BlockConstraints):
-        canonicalized.append(block_cons)
-      else:
-        raise ValueError(f"Unknown constraint {block_cons}.")
-
-    return canonicalized
-
-  def find_maximum_a_posteriori(self,
-                                gp: FiniteDimensionalGP,
-                                partition: VariablePartition,
-                                constraints: List[Optional[BlockConstraints]]) -> jnp.array:
-    """Find the maximum mode of the Gaussian process under the constraints."""
-    try:
-      from jaxopt import BoxOSQP
-    except ImportError:
-      raise ImportError("Please install jaxopt to use constraints.")
-
-    constraints = ConstraintsSolver._canonicalize_constraints(partition, constraints)
-
-    if ConstraintsSolver.no_constraints(constraints):
-      return gp.mean
-
-    objective_fun = ConstraintsSolver._objective_fun
-    matvec_A = ConstraintsSolver._build_matvec(partition, constraints)
-    params_ineq = ConstraintsSolver._build_bounds(partition, constraints)
-    
-    solver = BoxOSQP(fun=objective_fun, matvec_A=matvec_A, **self.solver_kwargs)
-
-    # warm start the solver with the mean of the Gaussian process to speed up convergence.
-    alpha0 = gp.mean
-    hyper_params = dict(params_obj=gp, params_eq=None, params_ineq=params_ineq)
-    kkt_sol = solver.init_params(init_x=alpha0, **hyper_params)  # initialize the solver with the mean of the Gaussian process.
-    kkt_sol, state = solver.run(init_params=kkt_sol, **hyper_params)
-
-    del state  # unused
-
-    alpha_optimized = kkt_sol.primal[0]
-
-    return alpha_optimized
+    params_ineq = (l, u)
+    return params_ineq
