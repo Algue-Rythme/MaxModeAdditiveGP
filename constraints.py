@@ -1,23 +1,10 @@
 from abc import ABC, abstractmethod
-from typing import Any, List, Optional, Tuple, Callable
+from typing import Any, List, Tuple, Callable
 from dataclasses import dataclass as python_dataclass
 
 import numpy as onp
 import jax.numpy as jnp
-from flax.struct import dataclass as pytree
 from variables import VariableBlock
-
-
-@pytree
-class FiniteDimensionalGP:
-  """Finite dimensional Gaussian process evaluated at a set of points.
-
-  Attributes:
-    mean: mean of the Gaussian process of shape (L,).
-    inv_covariance: inverse of the covariance matrix of the Gaussian process, of shape (L, L).
-  """
-  mean: jnp.array
-  inv_covariance: jnp.array
 
 
 class BlockConstraints(ABC):

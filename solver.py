@@ -1,7 +1,8 @@
 from typing import Any, List, Optional, Tuple, Callable
 import jax.numpy as jnp
 
-from constraints import BlockConstraints, NoConstraints, FiniteDimensionalGP
+from constraints import BlockConstraints, NoConstraints
+from finite_gp import FiniteDimensionalGP
 from variables import VariablePartition
 
 
@@ -43,7 +44,7 @@ class ConstraintsSolver:
       params_obj: object of type FiniteDimensionalGP.
     """
     x = alpha - params_obj.mean
-    linear_form = jnp.dot(params_obj.inv_covariance, x)
+    linear_form = params_obj.matvec(x)
     scalar = jnp.vdot(x, linear_form)
     # we drop the 0.5 factor since it does not change the argmin.  
     return scalar
