@@ -44,7 +44,8 @@ class ConstraintsSolver:
       params_obj: object of type FiniteDimensionalGP.
     """
     x = alpha - params_obj.mean
-    linear_form = params_obj.matvec(x)
+    # "precision matrix" is the inverse of the covariance matrix.
+    linear_form = params_obj.precision_matvec(x)
     scalar = jnp.vdot(x, linear_form)
     # we drop the 0.5 factor since it does not change the argmin.  
     return scalar

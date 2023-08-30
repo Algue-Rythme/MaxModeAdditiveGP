@@ -3,6 +3,7 @@ from typing import List, Tuple
 
 import jax
 import jax.numpy as jnp
+import numpy as onp
 from jax.tree_util import tree_map
 from flax.struct import dataclass as pytree
 
@@ -86,7 +87,7 @@ class FiniteDimensionalGP(ABC):
     return mean
 
   @abstractmethod
-  def matvec(self, x: jnp.array) -> jnp.array:
+  def precision_matvec(self, x: jnp.array) -> jnp.array:
     """Compute the matrix-vector product Cov^{-1} x."""
     raise NotImplementedError
 
@@ -97,10 +98,10 @@ class DenseFiniteDimensionalGP(FiniteDimensionalGP):
 
   Attributes:
     mean: mean of the Gaussian process of shape (L,).
-    inv_covariance: inverse of the covariance matrix of the Gaussian process, of shape (L, L).
+    precision: inverse of the covariance matrix of the Gaussian process, of shape (L, L).
   """
   mean: jnp.array
-  inv_covariance: jnp.array
+  precision: jnp.array
 
   @staticmethod
   def from_partition_interpolator(partition_interpolator: PartitionInterpolator,
@@ -116,12 +117,18 @@ class DenseFiniteDimensionalGP(FiniteDimensionalGP):
     K_inv = jax.scipy.linalg.block_diag(*K_inv)  # shape (L, L)
     Phi = jnp.concatenate(Phi, axis=0)  # shape (L, n_points)
     GramPhi = Phi @ Phi.T  # matrix of shape (L, L)
-    inv_covariance = K_inv + (1. / regul) * GramPhi  # equation (30)
-    return DenseFiniteDimensionalGP(mean, inv_covariance)
+    precision = K_inv + (1. / regul) * GramPhi  # equation (30)
+    return DenseFiniteDimensionalGP(mean, precision)
 
-  def matvec(self, x: jnp.array) -> jnp.array:
+  def precision_matvec(self, x: jnp.array) -> jnp.array:
     """Compute the matrix-vector product Cov^{-1} x."""
-    return jnp.dot(self.inv_covariance, x)
+    return jnp.dot(self.precision, x)
+
+
+def _split_as(x: jnp.array, y: List[jnp.array]):
+  """Split x into a list of arrays of the same shape as y."""
+  indices = onp.cumsum([len(y_i) for y_i in y[:-1]])  # onp.array = compile-time constant
+  return jnp.split(x, indices)
 
 
 @pytree
@@ -130,11 +137,14 @@ class SparseFiniteDimensionalGP(FiniteDimensionalGP):
 
   Attributes:
     mean: mean of the Gaussian process of shape (L,).
-    inv_covariance: inverse of the covariance matrix of the Gaussian process, of shape (L, L).
+    K_cholesky_factors: list of tuples of arrays of shape (L_b, L_b),
+                        factors of the Cholesky decomposition of the block-diagonal kernel.
+    Phi: values of the hat functions at x_train, list of arrays of shape (L_b, n_points)
+    inv_regul: inverse of the regularization parameter.
   """
   mean: jnp.array
   K_cholesky_factors: List[Tuple[jnp.array]]
-  Phi: jnp.array
+  Phi: List[jnp.array]
   inv_regul: float
 
   @staticmethod
@@ -144,16 +154,27 @@ class SparseFiniteDimensionalGP(FiniteDimensionalGP):
     """Create a finite dimensional Gaussian process from the krnel, the interpolant Phi and the inverse regularization parameter."""
     mean = FiniteDimensionalGP._compute_mean(partition_interpolator, y_train, regul)
     K, Phi = partition_interpolator.K, partition_interpolator.Phi
-    K_cholesky_factors = tree_map(jax.scipy.linalg.cho_factor, K)  # list of arrays of shape (L_b, L_b)
+    def cho_factor(K_block):
+      fac, _ = jax.scipy.linalg.cho_factor(K_block, lower=False)
+      return fac
+    K_cholesky_factors = tree_map(cho_factor, K)  # list of arrays of shape (L_b, L_b)
     return SparseFiniteDimensionalGP(mean, K_cholesky_factors, Phi, 1. / regul)
 
-  def matvec(self, x: jnp.array) -> jnp.array:
+  def precision_matvec(self, x: jnp.array) -> jnp.array:
     """Compute the matrix-vector product Cov^{-1} x."""
+    # split x so that it has the same shape as Phi
+    splitted_x = _split_as(x, self.Phi)
+
     # list of arrays of shape (L_b,)
-    inv_K_x = map(jax.scipy.linalg.cho_solve, self.K_cholesky_factors, x)
+    def cho_solve(cho_factor, rhs):
+      # boolean is a compile-time constant: not jittable
+      return jax.scipy.linalg.cho_solve((cho_factor, False), rhs)
+    
+    inv_K_x = tree_map(cho_solve, self.K_cholesky_factors, splitted_x)
     # shape array of (L,)
     inv_K_x = jnp.concatenate(inv_K_x, axis=0)
     # shape array of (L,)
-    Gram_Phi_x = jnp.dot(self.Phi, jnp.dot(self.Phi.T, x))
+    Phi_dense = jnp.concatenate(self.Phi, axis=0)  # shape (L, n_points)
+    Gram_Phi_x = jnp.dot(Phi_dense, jnp.dot(Phi_dense.T, x))
 
     return inv_K_x + self.inv_regul * Gram_Phi_x
