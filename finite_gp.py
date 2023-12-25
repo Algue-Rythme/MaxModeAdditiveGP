@@ -49,7 +49,7 @@ class FiniteDimensionalGP(ABC):
   def from_partition_interpolator(partition_interpolator: PartitionInterpolator,
                                   y_train: jnp.array,
                                   regul: float):
-    """Create a finite dimensional Gaussian process from the krnel, the interpolant Phi and the inverse regularization parameter."""
+    """Create a finite dimensional Gaussian process from the kernel, the interpolant Phi and the inverse regularization parameter."""
     raise NotImplementedError
   
   @staticmethod
@@ -151,7 +151,7 @@ class SparseFiniteDimensionalGP(FiniteDimensionalGP):
   def from_partition_interpolator(partition_interpolator: PartitionInterpolator,
                                   y_train: jnp.array,
                                   regul: float) -> FiniteDimensionalGP:
-    """Create a finite dimensional Gaussian process from the krnel, the interpolant Phi and the inverse regularization parameter."""
+    """Create a finite dimensional Gaussian process from the kernel, the interpolant Phi and the inverse regularization parameter."""
     mean = FiniteDimensionalGP._compute_mean(partition_interpolator, y_train, regul)
     K, Phi = partition_interpolator.K, partition_interpolator.Phi
     def cho_factor(K_block):

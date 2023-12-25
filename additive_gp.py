@@ -7,7 +7,7 @@ from flax.struct import dataclass as pytree
 import jax.numpy as jnp
 from jaxopt.tree_util import tree_map
 
-from finite_gp import FiniteDimensionalGP, SparseFiniteDimensionalGP, DenseFiniteDimensionalGP
+from finite_gp import SparseFiniteDimensionalGP, DenseFiniteDimensionalGP
 from finite_gp import BlockInterpolator, PartitionInterpolator
 from constraints import BlockConstraints
 from function_basis import FunctionBasis
@@ -84,15 +84,16 @@ class ConstrainedAdditiveGP:
                   Length must match the number of blocks in the partition.  
                   Use None in the entry for no constraints.
     solver: quadratic solver for the constraints (default ConstraintsSolver).
+    finite_gp_representation: str, either 'sparse' or 'dense' (default 'sparse').
     debug: bool, whether to perform debug checks (default False).
   """
   partition: VariablePartition
   function_basis: FunctionBasis
-  kernel: List[MultivariateKernel]
+  kernel: MultivariateKernel
   constraints: List[Optional[BlockConstraints]]
   regul: float = 1e-3
   solver: ConstraintsSolver = ConstraintsSolver()
-  FiniteGP: FiniteDimensionalGP = SparseFiniteDimensionalGP
+  finite_gp_representation: str = 'sparse'
   verbose: bool = False
 
   def fit_variable_block(self,
@@ -149,9 +150,18 @@ class ConstrainedAdditiveGP:
     # evaluate the kernel on knots coordinates, evaluate the hat functions on x_train.
     partition_interpolator = self.fit_blocks(x_train)
     # estimate the mean and the covariance matrix of the additive GP (with constraints).
-    gp = self.FiniteGP.from_partition_interpolator(partition_interpolator, y_train, self.regul)
+
+    if self.finite_gp_representation == 'sparse':
+      gp = SparseFiniteDimensionalGP.from_partition_interpolator(partition_interpolator, y_train, self.regul)
+    elif self.finite_gp_representation == 'dense':
+      gp = DenseFiniteDimensionalGP.from_partition_interpolator(partition_interpolator, y_train, self.regul)
+    else:
+      raise ValueError(f'Unknown finite GP representation {self.finite_gp_representation}')
+    
     # Find the maximum mode of the GP under the constraints.
     ksi = self.solver.find_maximum_a_posteriori(gp, self.partition, self.constraints)
+
     # change ksi from dense vector of shape (L,) to list of arrays of shape (L_b,)
     ksi = self.partition.split(ksi)  # list of arrays of shape (L_b,)
+
     return AdditiveFunction(ksi, self.partition, self.function_basis)
